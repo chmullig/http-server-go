@@ -3,10 +3,13 @@ package main
 import (
     "fmt"
     "os"
+    "io"
     "strings"
     "path"
     "net"
     "bufio"
+    "regexp"
+    "html"
 )
 
 func main() {
@@ -69,6 +72,24 @@ func sendErrorPage(conn net.Conn, rw *bufio.ReadWriter, request string, code int
         conn.Close()
 }
 
+func statusString(code int) (msg string) {
+    msgDb := map[int]string{
+        200: "OK",
+        304: "Not Modified",
+        400: "Bad Request",
+        401: "Unauthorized",
+        403: "Forbidden",
+        404: "Not Found",
+        405: "Method Not Allowed",
+        418: "I'm a teapot",
+        500: "Internal Server Error",
+        501: "Not Implemented",
+        505: "HTTP Version Not Supported",
+    }
+    msg = msgDb[code]
+    return msg
+}
+
 func handleConnection(conn net.Conn, root string, mdbrw *bufio.ReadWriter) {
     rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 
@@ -97,6 +118,17 @@ func handleConnection(conn net.Conn, root string, mdbrw *bufio.ReadWriter) {
 
     //Take a look at what they requested, and see if we can provide it
     file := strings.Join(request[1:len(request)-1], " ")
+
+    //If they asked for mdb-lookup, give it to them
+    if strings.HasPrefix(file, "/mdb-lookup") {
+        rw.Write(prepHeaders(conn, request_line, 200))
+        mdbPage(request_line, rw, mdbrw)
+        rw.Flush()
+        conn.Close()
+        return
+    }
+
+
     fn := path.Join(root, file)
     rdr, rdr_err := os.Open(fn)
     fi, fi_err := os.Stat(fn)
@@ -157,20 +189,59 @@ func handleConnection(conn net.Conn, root string, mdbrw *bufio.ReadWriter) {
 }
 
 
-func statusString(code int) (msg string) {
-    msgDb := map[int]string{
-        200: "OK",
-        304: "Not Modified",
-        400: "Bad Request",
-        401: "Unauthorized",
-        403: "Forbidden",
-        404: "Not Found",
-        405: "Method Not Allowed",
-        418: "I'm a teapot",
-        500: "Internal Server Error",
-        501: "Not Implemented",
-        505: "HTTP Version Not Supported",
+
+
+
+func mdbPage(request_line string, rw *bufio.ReadWriter, mdbrw *bufio.ReadWriter) {
+    request := strings.Split(request_line, " ")
+    path := strings.Join(request[1:len(request)-1], " ")
+    query := strings.SplitN(path, "=", 2)
+
+    rw.Write([]byte(`<html><head><style>
+            table {padding: 5px; border-collapse: collapse;}
+            th {text-align: left; padding-right: 20px;}
+            .name {padding-right: 15px;}
+            tr.even {background-color: #F5F5F5; }
+            tr.odd {background-color: #DDDDDD; }
+            </style></head><body><h1>mdb-lookup</h1>
+            <form method=GET action="/mdb-lookup">`))
+
+    rw.Write([]byte(fmt.Sprintf("Lookup: <input type=text name=key value=\"%s\">\n<input type=submit></form>", query[1])))
+
+    if len(query) > 1 {
+        //we have a search
+        rw.Write([]byte("<hr>\n<table><tr><th>Num</th><th>Name</th><th>Message</th></tr>\n"))
+        mdbrw.Write([]byte(query[1] + "\n"))
+        mdbrw.Flush()
+        re := regexp.MustCompile("([0-9]+): {(.*)} said {(.*)}")
+        i := 0
+        for {
+            buf, _, err := mdbrw.ReadLine()
+            if err == io.EOF {
+                break
+            } else if err != nil {
+                println("error reading: ", err.Error())
+                break
+            } else if len(buf) == 0 {
+                break
+            }
+            line := re.FindStringSubmatch(string(buf))
+            num := line[1]
+            name := html.EscapeString(line[2])
+            msg := html.EscapeString(line[3])
+
+            class := "odd"
+            if i % 2 == 0{
+                class = "even"
+            }
+            i++
+            fmtted := fmt.Sprintf("<tr class=%s><td class=num>%s</td><td class=name>%s</td><td class=msg>%s</td></tr>\n",
+                class, num, name, msg)
+            rw.Write([]byte(fmtted))
+            rw.Flush()
+        }
+        rw.Write([]byte("</table>\n"))
     }
-    msg = msgDb[code]
-    return msg
+    rw.Write([]byte("</body></html>"))
+    rw.Flush()
 }
