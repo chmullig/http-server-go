@@ -53,7 +53,8 @@ func prepErrorPage(code int) (body []byte) {
 
 //Send an error page and close the connection
 func sendErrorPage(conn net.Conn, rw *bufio.ReadWriter, code int, body []byte) {
-        fmt.Printf("sending a %d\n", code)
+        host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+        fmt.Printf("%s \"%s\" %d %s\n", host, "lol", code, statusString(code))
         if body == nil {
             body = prepErrorPage(code)
         }
