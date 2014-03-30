@@ -20,17 +20,20 @@ func main() {
     lookup_host := os.Args[3]
     lookup_port := os.Args[4]
 
+    //open an mdb-lookup connection, and wrap it in a bufio R/W
     mdbconn, err := net.Dial("tcp", fmt.Sprintf("%s:%s", lookup_host, lookup_port))
     if err != nil {
         os.Exit(1)
     }
     mdbrw := bufio.NewReadWriter(bufio.NewReader(mdbconn), bufio.NewWriter(mdbconn))
 
+    //Listen on the given port
     ln, err := net.Listen("tcp", fmt.Sprintf(":%s", listen_port))
     if err != nil {
         os.Exit(1)
     }
 
+    //accept connections, and hand them off to a goroutine
     for {
         conn, err := ln.Accept()
         if err != nil {
@@ -41,14 +44,14 @@ func main() {
     }
 }
 
-
+//Just prepare an error page
 func prepErrorPage(code int) (body []byte) {
     summary := fmt.Sprintf("%d %s", code, statusString(code))
     body = []byte(fmt.Sprintf("<title>%s</title><h1>%s</h1>", summary, summary))
     return body
 }
 
-
+//Send an error page and close the connection
 func sendErrorPage(conn net.Conn, rw *bufio.ReadWriter, code int, body []byte) {
         fmt.Printf("sending a %d\n", code)
         if body == nil {
@@ -62,15 +65,12 @@ func sendErrorPage(conn net.Conn, rw *bufio.ReadWriter, code int, body []byte) {
 }
 
 func handleConnection(conn net.Conn, root string, mdbrw *bufio.ReadWriter) {
-    fmt.Printf("Handling connection from %s\n", conn.RemoteAddr())
-
     rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 
+    //Read and slightly parse the headers
     scanner := bufio.NewScanner(conn)
     scanner.Scan()
-
     request_line := scanner.Text()
-
     for scanner.Scan() {
         txt := scanner.Text()
         if len(txt) < 1 { break; }
@@ -78,10 +78,8 @@ func handleConnection(conn net.Conn, root string, mdbrw *bufio.ReadWriter) {
     request := strings.Split(request_line, " ")
     fmt.Println(request_line)
 
-    if false {
-        sendErrorPage(conn, rw, 400, nil)
-        return
-    } else if len(request) < 3 {
+    //Make sure it's at least a slightly valid HTTP request
+    if len(request) < 3 {
         sendErrorPage(conn, rw, 400, nil)
         return
     } else if request[len(request)-1] != "HTTP/1.0" && request[len(request)-1] != "HTTP/1.1" {
@@ -93,23 +91,52 @@ func handleConnection(conn net.Conn, root string, mdbrw *bufio.ReadWriter) {
         return
     }
 
+    //Take a look at what they requested, and see if we can provide it
     file := strings.Join(request[1:len(request)-1], " ")
     fn := path.Join(root, file)
-    fi, err := os.Stat(fn)
-    if err != nil {
-        fmt.Println(err)
+    rdr, rdr_err := os.Open(fn)
+    fi, fi_err := os.Stat(fn)
+
+    if fi_err != nil {
+        fmt.Println(fi_err)
         sendErrorPage(conn, rw, 404, nil)
         return
     } else if fi.IsDir() {
-        //body = []byte("this is a directory...")
+        //We're a directory, let's see if there's an index.html we can serve,
+        //otherwise send the directory listing
+        if _, err := os.Stat(path.Join(fn, "index.html")); os.IsNotExist(err) {
+            code := 200
+            headers := []byte(fmt.Sprintf("HTTP/1.0 %d %s\r\n\r\n", code, statusString(code)))
+            rw.Write(headers)
+            rw.Write([]byte("<body><ul>\n"))
+            files, _ := rdr.Readdirnames(0)
+            for _, name := range files {
+                row := []byte(fmt.Sprintf("<li><a href=\"%s%s\">%s</a></li>\n", file, name, name));
+                rw.Write(row)
+            }
+            rw.Write([]byte("</ul></body>\n"))
+            rw.Flush()
+            conn.Close()
+            return
+        } else {
+            fn = path.Join(root, file, "index.html")
+            rdr, rdr_err = os.Open(fn)
+        }
     }
 
-    rdr, err := os.Open(fn)
-    if err != nil {
+    //Try to open file, check a few common error conditions
+    if os.IsPermission(rdr_err) {
+        sendErrorPage(conn, rw, 403, nil)
+        return
+    } else if os.IsNotExist(rdr_err) {
+        sendErrorPage(conn, rw, 404, nil)
+        return
+    } else if rdr_err != nil {
         sendErrorPage(conn, rw, 500, nil)
         return
     }
 
+    //At long last, everything is ok so let's send the file
     code := 200
     headers := []byte(fmt.Sprintf("HTTP/1.0 %d %s\r\n\r\n", code, statusString(code)))
     rw.Write(headers)
